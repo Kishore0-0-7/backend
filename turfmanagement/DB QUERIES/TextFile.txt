@@ -1,0 +1,25 @@
+﻿CREATE TABLE Users (
+    UserId SERIAL PRIMARY KEY,
+    PhoneNumber VARCHAR(15) NOT NULL UNIQUE,
+    Name VARCHAR(100),
+    LastBookingDate DATE
+);
+
+CREATE TABLE Slots (
+    SlotId SERIAL PRIMARY KEY,
+    SlotDate DATE NOT NULL,
+    SlotTime VARCHAR(20) NOT NULL,
+    Status VARCHAR(20) NOT NULL CHECK (Status IN ('Unavailable', 'Maintenance', 'Available'))
+);
+
+
+
+CREATE TABLE Bookings (
+    BookingId SERIAL PRIMARY KEY,
+    UserId INT NOT NULL REFERENCES Users(UserId),
+    BookingDate DATE NOT NULL,
+    SlotTimeFrom VARCHAR(20),
+    SlotTimeTo VARCHAR(20),
+    Amount NUMERIC(10,2)
+);
+

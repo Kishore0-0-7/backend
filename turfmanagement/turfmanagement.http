@@ -1,0 +1,6 @@
+@turfmanagement_HostAddress = http://localhost:5125
+
+GET {{turfmanagement_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

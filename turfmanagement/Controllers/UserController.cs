@@ -73,6 +73,47 @@ namespace turfmanagement.Controllers
             });
         }
 
+        [HttpPut("update-name")]
+        public IActionResult UpdateUserName([FromBody] UserUpdateDto updateDto)
+        {
+            using var conn = _db.GetConnection();
+            conn.Open();
+
+            // Check if user exists
+            string checkQuery = "SELECT UserId FROM Users WHERE PhoneNumber = @phone";
+            using var checkCmd = new NpgsqlCommand(checkQuery, conn);
+            checkCmd.Parameters.AddWithValue("@phone", updateDto.PhoneNumber);
+
+            using var reader = checkCmd.ExecuteReader();
+            if (!reader.Read())
+            {
+                return NotFound(new { message = "User not found" });
+            }
+            
+            int userId = (int)reader["UserId"];
+            reader.Close();
+
+            // Update the user name
+            string updateQuery = "UPDATE Users SET Name = @name WHERE UserId = @userId";
+            using var updateCmd = new NpgsqlCommand(updateQuery, conn);
+            updateCmd.Parameters.AddWithValue("@name", updateDto.Name);
+            updateCmd.Parameters.AddWithValue("@userId", userId);
+            
+            int rowsAffected = updateCmd.ExecuteNonQuery();
+            
+            if (rowsAffected > 0)
+            {
+                return Ok(new
+                {
+                    message = "User name updated successfully",
+                    userId = userId,
+                    name = updateDto.Name,
+                    phoneNumber = updateDto.PhoneNumber
+                });
+            }
+            
+            return StatusCode(500, new { message = "Failed to update user name" });
+        }
     }
 
     public class UserDto
@@ -80,5 +121,10 @@ namespace turfmanagement.Controllers
         public string PhoneNumber { get; set; }
         public string Name { get; set; }
     }
-
+    
+    public class UserUpdateDto
+    {
+        public string PhoneNumber { get; set; }
+        public string Name { get; set; }
+    }
 }

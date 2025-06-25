@@ -19,12 +19,14 @@
 If you prefer to deploy manually:
 
 1. Extract the application:
+
    ```bash
    mkdir -p /opt/turfmanagement
    tar -xzf turfmanagement-deploy.tar.gz -C /opt/turfmanagement
    ```
 
 2. Run the application (temporary):
+
    ```bash
    cd /opt/turfmanagement
    dotnet turfmanagement.dll --urls=http://0.0.0.0:5125
@@ -42,6 +44,7 @@ The application is configured to run on port 5125.
 ### Database Connection
 
 The application is configured to connect to:
+
 - Host: database-1.ctec8u86oi32.eu-north-1.rds.amazonaws.com
 - Port: 5432
 - Database: turrfzone
@@ -53,6 +56,7 @@ If you need to change this configuration, modify the `ConnectionStrings` section
 If running on AWS Lightsail:
 
 1. Ensure port 5125 is open in your instance's firewall:
+
    - Go to the Lightsail console
    - Select your instance
    - Go to the "Networking" tab

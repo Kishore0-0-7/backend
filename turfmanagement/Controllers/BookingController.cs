@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using Npgsql;
 using turfmanagement.Connection;
 using System.Globalization;
+using System.Linq;
 
 namespace turfmanagement.Controllers
 {
@@ -63,6 +64,106 @@ namespace turfmanagement.Controllers
                     // Ignore errors with constraint creation - it's just a safety measure
                 }
 
+                // STEP 1: Generate time slots to be booked and verify availability
+                List<string> timeSlots = new List<string>();
+                try
+                {
+                    // Parse times to generate the slot list
+                    DateTime referenceDate = new DateTime(2000, 1, 1); // Reference date for time parsing
+                    DateTime from, to;
+                    
+                    // Parse from time
+                    from = DateTime.ParseExact(
+                        dto.SlotTimeFrom,
+                        new[] { "h tt", "hh tt" },
+                        CultureInfo.InvariantCulture,
+                        DateTimeStyles.None);
+
+                    // Parse to time with special handling for 12 AM
+                    if (dto.SlotTimeTo == "12 AM")
+                    {
+                        to = referenceDate.AddDays(1).Date; // Midnight of next day
+                    }
+                    else
+                    {
+                        to = DateTime.ParseExact(
+                            dto.SlotTimeTo,
+                            new[] { "h tt", "hh tt" },
+                            CultureInfo.InvariantCulture,
+                            DateTimeStyles.None);
+                    }
+
+                    // Only keep the time parts with the reference date
+                    from = referenceDate.Date.Add(from.TimeOfDay);
+                    if (dto.SlotTimeTo != "12 AM")
+                    {
+                        to = referenceDate.Date.Add(to.TimeOfDay);
+                    }
+
+                    // Adjust if end time is earlier in the day than start time
+                    if (to <= from && dto.SlotTimeTo != "12 AM")
+                    {
+                        to = to.AddDays(1);
+                    }
+
+                    // Generate the time slots between from and to
+                    for (DateTime time = from; time < to; time = time.AddHours(1))
+                    {
+                        string timeStr = time.ToString("h tt");
+                        timeSlots.Add(timeStr);
+                    }
+
+                    Console.WriteLine($"📊 Generated time slots to verify: {string.Join(", ", timeSlots)}");
+                }
+                catch (FormatException ex)
+                {
+                    tran.Rollback();
+                    Console.WriteLine($"❌ Time format error: {ex.Message}");
+                    return BadRequest(new { message = $"Invalid time format: {ex.Message}" });
+                }
+
+                // STEP 2: Check availability of all slots with row-level locking
+                foreach (var timeSlot in timeSlots)
+                {
+                    string checkAvailability = @"
+                        SELECT Status 
+                        FROM Slots 
+                        WHERE SlotDate = @date AND SlotTime = @time
+                        FOR UPDATE;
+                    ";
+
+                    using var cmdCheck = new NpgsqlCommand(checkAvailability, conn);
+                    cmdCheck.Parameters.AddWithValue("@date", bookingDate.Date);
+                    cmdCheck.Parameters.AddWithValue("@time", timeSlot);
+                    cmdCheck.Transaction = tran;
+
+                    var existingStatus = cmdCheck.ExecuteScalar()?.ToString();
+
+                    if (existingStatus == "Unavailable")
+                    {
+                        tran.Rollback();
+                        Console.WriteLine($"❌ Slot {timeSlot} is already booked");
+                        return Conflict(new { 
+                            message = $"Slot {timeSlot} is already booked by another user. Please select different time slots.",
+                            conflictSlot = timeSlot,
+                            status = "SlotUnavailable"
+                        });
+                    }
+
+                    if (existingStatus == "Maintenance")
+                    {
+                        tran.Rollback();
+                        Console.WriteLine($"❌ Slot {timeSlot} is under maintenance");
+                        return BadRequest(new { 
+                            message = $"Slot {timeSlot} is currently under maintenance. Please select different time slots.",
+                            conflictSlot = timeSlot,
+                            status = "SlotMaintenance"
+                        });
+                    }
+                }
+
+                Console.WriteLine($"✅ All slots are available for booking");
+
                 // Insert booking
                 string insertBooking = @"
                     INSERT INTO Bookings (UserId, BookingDate, SlotTimeFrom, SlotTimeTo, Amount)
@@ -80,92 +181,24 @@ namespace turfmanagement.Controllers
 
                 int bookingId = (int)cmdBooking.ExecuteScalar();
 
-                // Insert each slot into Slots table
-                try
+                // STEP 3: Mark all verified slots as unavailable
+                foreach (var timeSlot in timeSlots)
                 {
-                    Console.WriteLine($"⏰ Parsing time slots from {dto.SlotTimeFrom} to {dto.SlotTimeTo}");
-                    
-                    // Parse times - frontend sends "2 PM" format or "12 AM" format
-                    // Create a reference date for parsing
-                    DateTime referenceDate = DateTime.Today; // Use today as base
-                    
-                    // Parse from time
-                    DateTime from = DateTime.ParseExact(
-                        dto.SlotTimeFrom, 
-                        new[] { "h tt", "hh tt" }, // Support both "2 PM" and "12 AM" formats
-                        CultureInfo.InvariantCulture,
-                        DateTimeStyles.None);
-                    
-                    // Special handling for "12 AM" as end time
-                    DateTime to;
-                    if (dto.SlotTimeTo == "12 AM")
-                    {
-                        // If end time is 12 AM, set it to midnight (next day)
-                        to = referenceDate.AddDays(1).Date; // Midnight of next day
-                    }
-                    else
-                    {
-                        // Normal parsing for other times
-                        to = DateTime.ParseExact(
-                            dto.SlotTimeTo, 
-                            new[] { "h tt", "hh tt" }, // Support both formats
-                            CultureInfo.InvariantCulture,
-                            DateTimeStyles.None);
-                    }
-                    
-                    // Only keep the time parts with the reference date
-                    from = referenceDate.Date.Add(from.TimeOfDay);
-                    if (dto.SlotTimeTo != "12 AM") // Only adjust non-midnight end times
-                    {
-                        to = referenceDate.Date.Add(to.TimeOfDay);
-                    }
-                    
-                    // Adjust if end time is earlier in the day than start time
-                    // This means booking spans midnight
-                    if (to <= from && dto.SlotTimeTo != "12 AM")
-                    {
-                        to = to.AddDays(1);
-                    }
-                    
-                    Console.WriteLine($"📊 Parsed times: From={from:yyyy-MM-dd HH:mm}, To={to:yyyy-MM-dd HH:mm}");
-                    
-                    // Generate the time slots between from and to
-                    List<string> timeSlots = new List<string>();
-                    for (DateTime time = from; time < to; time = time.AddHours(1))
-                    {
-                        string timeStr = time.ToString("h tt"); // Format as "2 PM" to match frontend
-                        timeSlots.Add(timeStr);
-                        
-                        string insertSlot = @"
-                            INSERT INTO Slots (SlotDate, SlotTime, Status)
-                            VALUES (@date, @time, 'Unavailable')
-                            ON CONFLICT (SlotDate, SlotTime) DO UPDATE
-                            SET Status = 'Unavailable';
-                        ";
+                    string insertSlot = @"
+                        INSERT INTO Slots (SlotDate, SlotTime, Status)
+                        VALUES (@date, @time, 'Unavailable')
+                        ON CONFLICT (SlotDate, SlotTime) DO UPDATE
+                        SET Status = 'Unavailable';
+                    ";
 
-                        using var cmdSlot = new NpgsqlCommand(insertSlot, conn);
-                        cmdSlot.Parameters.AddWithValue("@date", bookingDate.Date);
-                        cmdSlot.Parameters.AddWithValue("@time", timeStr);
-                        cmdSlot.Transaction = tran;
-                        cmdSlot.ExecuteNonQuery();
-                    }
-                    
-                    Console.WriteLine($"✅ Marked slots as unavailable: {string.Join(", ", timeSlots)}");
+                    using var cmdSlot = new NpgsqlCommand(insertSlot, conn);
+                    cmdSlot.Parameters.AddWithValue("@date", bookingDate.Date);
+                    cmdSlot.Parameters.AddWithValue("@time", timeSlot);
+                    cmdSlot.Transaction = tran;
+                    cmdSlot.ExecuteNonQuery();
                 }
-                catch (FormatException ex)
-                {
-                    tran.Rollback();
-                    Console.WriteLine($"❌ Time format error: {ex.Message}");
-                    Console.WriteLine($"🔍 Attempted to parse: From=\"{dto.SlotTimeFrom}\", To=\"{dto.SlotTimeTo}\"");
-                    return BadRequest(new { message = $"Invalid time format: {ex.Message}" });
-                }
-                catch (Exception ex)
-                {
-                    tran.Rollback();
-                    Console.WriteLine($"❌ Slot insertion error: {ex.Message}");
-                    Console.WriteLine($"🔍 Attempted to process slots: From=\"{dto.SlotTimeFrom}\", To=\"{dto.SlotTimeTo}\"");
-                    return BadRequest(new { message = $"Error processing time slots: {ex.Message}" });
-                }
+
+                Console.WriteLine($"✅ Marked slots as unavailable: {string.Join(", ", timeSlots)}");
 
                 // Update user's LastBookingDate
                 string updateUser = @"
@@ -261,6 +294,92 @@ namespace turfmanagement.Controllers
 
             return Ok(bookings);
         }
+
+
+
+        [HttpPost("verify")]
+        public IActionResult VerifySlotAvailability([FromBody] SlotCheckDto dto)
+        {
+            Console.WriteLine($"🔍 Verifying slots on {dto.SlotDate} for times: {string.Join(", ", dto.SlotTimes)}");
+
+            if (!DateTime.TryParse(dto.SlotDate, out DateTime slotDate))
+                return BadRequest(new { message = "Invalid date format" });
+
+            using var conn = _db.GetConnection();
+            conn.Open();
+            using var tran = conn.BeginTransaction();
+
+            try
+            {
+                var unavailableSlots = new List<string>();
+
+                foreach (var time in dto.SlotTimes)
+                {
+                    // Use row-level locking to prevent concurrent modifications
+                    string query = @"
+                        SELECT Status 
+                        FROM Slots 
+                        WHERE SlotDate = @date AND SlotTime = @time
+                        FOR UPDATE NOWAIT;
+                    ";
+
+                    using var cmd = new NpgsqlCommand(query, conn);
+                    cmd.Parameters.AddWithValue("@date", slotDate.Date);
+                    cmd.Parameters.AddWithValue("@time", time);
+                    cmd.Transaction = tran;
+
+                    try
+                    {
+                        var status = cmd.ExecuteScalar()?.ToString();
+
+                        if (status == "Unavailable")
+                        {
+                            unavailableSlots.Add(time);
+                            Console.WriteLine($"❌ Slot {time} is already booked.");
+                        }
+                        else if (status == "Maintenance")
+                        {
+                            unavailableSlots.Add(time);
+                            Console.WriteLine($"❌ Slot {time} is under maintenance.");
+                        }
+                    }
+                    catch (NpgsqlException ex) when (ex.SqlState == "55P03") // Lock not available
+                    {
+                        // Another transaction is currently modifying this slot
+                        unavailableSlots.Add(time);
+                        Console.WriteLine($"❌ Slot {time} is currently being processed by another booking.");
+                    }
+                }
+
+                tran.Rollback(); // We're only checking, not modifying
+
+                if (unavailableSlots.Any())
+                {
+                    Console.WriteLine($"❌ Some slots are not available: {string.Join(", ", unavailableSlots)}");
+                    return Ok(new { 
+                        status = "Unavailable", 
+                        message = $"The following slots are not available: {string.Join(", ", unavailableSlots)}",
+                        unavailableSlots = unavailableSlots
+                    });
+                }
+
+                Console.WriteLine("✅ All slots are available.");
+                return Ok(new { 
+                    status = "Available", 
+                    message = "All selected slots are available.",
+                    unavailableSlots = new List<string>()
+                });
+            }
+            catch (Exception ex)
+            {
+                tran.Rollback();
+                Console.WriteLine($"❌ Error verifying slots: {ex.Message}");
+                return StatusCode(500, new { 
+                    message = "Error verifying slot availability", 
+                    error = ex.Message 
+                });
+            }
+        }
     }
 
     public class BookSlotDto
@@ -280,5 +399,12 @@ namespace turfmanagement.Controllers
         public string SlotTimeFrom { get; set; }
         public string SlotTimeTo { get; set; }
         public decimal Amount { get; set; }
+    }
+
+
+    public class SlotCheckDto
+    {
+        public string SlotDate { get; set; }  // e.g. "2025-07-01"
+        public List<string> SlotTimes { get; set; }  // e.g. ["3 PM", "4 PM"]
     }
 }
